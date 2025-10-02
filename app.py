@@ -3,7 +3,6 @@ import requests
 import re
 import os
 from collections import defaultdict
-from datetime import datetime
 
 app = Flask(__name__)
 
@@ -41,7 +40,8 @@ def add_group_title(extinf_line, category):
 
 def parse_and_clean(lines):
     organized = ['#EXTM3U']
-    for i in range(len(lines)):
+    i = 0
+    while i < len(lines):
         line = lines[i].rstrip('\n')
         if line.strip().startswith('#EXTINF'):
             ext = line
@@ -53,13 +53,21 @@ def parse_and_clean(lines):
                     found = cat
                     break
             if not found:
+                i += 2
                 continue
             new_ext = add_group_title(ext, found)
             organized.append(new_ext)
             organized.append(stream)
+            i += 2
+        else:
+            i += 1
     return organized
 
-# ======== Flask Route ========
+# ======== Routes ========
+@app.route("/")
+def home():
+    return "Flask app is running! Visit /m3u for your playlist."
+
 @app.route("/m3u")
 def get_m3u():
     try:
@@ -79,5 +87,5 @@ def get_m3u():
 
 # ======== Run App ========
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))  # Use Render's port
     app.run(host="0.0.0.0", port=port)
