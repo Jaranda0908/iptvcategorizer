@@ -13,22 +13,19 @@ EXTINF_REGEX = re.compile(r'^(#EXTINF:[^,]*)(?:,)(.*)', re.IGNORECASE)
 
 # ======== Categories (Customized Final List) ========
 CATEGORIES = {
-    # 1. USA NEWS: General News + Specific Local (Chicago/Illinois) only
+    # USA CATEGORIES
     "USA News": ["cnn", "fox news", "msnbc", "nbc news", "abc news", "cbs news", "chicago", "illinois"],
-
     "USA Movies": ["hbo", "cinemax", "starz", "amc", "showtime", "tcm", "movie", "christmas"],
     "USA Kids": ["cartoon", "nick", "disney", "boomerang", "pbskids"],
-    
-    # 2. US LATINO: New category for US-based channels targeting Latino audiences
     "US LATINO": ["telemundo", "univision", "uni mas", "unimas", "galavision", "hispana"],
     
-    # MEXICO CATEGORIES RESTORED TO ORIGINAL:
+    # MEXICO CATEGORIES
     "Mexico News": ["televisa", "tv azteca", "milenio", "imagen", "foro tv", "forotv"],
     "Mexico Movies": ["cine", "canal 5", "canal once", "cinema"],
     "Mexico Kids": ["canal once niños", "bitme", "kids mexico"],
     "Mexico General": ["las estrellas", "azteca uno", "canal 2", "televisa"],
     
-    # Sports (Kept the same)
+    # GLOBAL CATEGORIES (Can apply to US or MX streams if keyword is present)
     "Basketball": ["nba", "basketball"],
     "Football": ["nfl", "football", "college football", "espn college"],
     "Baseball": ["mlb", "baseball"],
@@ -37,16 +34,18 @@ CATEGORIES = {
     "Golf": ["golf", "pga"],
     "Fighting": ["ufc", "boxing", "mma", "wwe", "fight"],
     "eSports": ["esports", "gaming", "twitch"],
-    
     "Documentary": ["nat geo", "discovery", "history", "documentary"],
     "Adult": ["xxx", "porn", "adult", "eros"]
-    
-    # Note: 'Music' category has been removed.
-    # Note: 'USA General' and 'Mexico General' fallbacks are handled in the logic below.
 }
 
 # Acceptable prefixes for initial filtering (includes your custom MXC|)
 ACCEPTABLE_PREFIXES = ('US|', 'MX|', 'MXC|')
+
+# Define which categories belong to which region for prioritization
+US_CATEGORY_NAMES = {"USA News", "USA Movies", "USA Kids", "US LATINO"}
+MEXICO_CATEGORY_NAMES = {"Mexico News", "Mexico Movies", "Mexico Kids", "Mexico General"}
+GLOBAL_CATEGORY_NAMES = CATEGORIES.keys() - US_CATEGORY_NAMES - MEXICO_CATEGORY_NAMES
+
 
 # ======== Helper Functions ========
 
@@ -66,7 +65,7 @@ def add_group_title(extinf_line, category):
 def stream_and_categorize(lines_iterator):
     """
     Generator that processes the M3U line-by-line, filtering by prefix,
-    categorizing, and removing duplicates, while remaining memory-efficient.
+    categorizing using prefix priority, and removing duplicates.
     """
     seen_streams = set()
     yield '#EXTM3U\n'
@@ -85,7 +84,6 @@ def stream_and_categorize(lines_iterator):
         
         if current_ext and (line.startswith('http') or line.startswith('rtmp')):
             
-            # Extract display name for prefix and keyword check
             display_match = EXTINF_REGEX.match(current_ext)
             if not display_match:
                 current_ext = None
@@ -94,9 +92,8 @@ def stream_and_categorize(lines_iterator):
             display_name = display_match.group(2).strip()
             display_upper = display_name.upper()
             display_lower = display_name.lower()
-
+            
             # --- 1. Crucial Prefix Filter ---
-            # Only channels starting with US|, MX|, or MXC| are processed
             if not display_upper.startswith(ACCEPTABLE_PREFIXES):
                 current_ext = None 
                 continue
@@ -108,24 +105,36 @@ def stream_and_categorize(lines_iterator):
             
             seen_streams.add(line)
 
-            # --- 3. Categorization ---
+            # --- 3. Categorization Logic (Prefix Priority) ---
             found = None
             
-            for cat, keywords in CATEGORIES.items():
-                if any(kw in display_lower for kw in keywords):
-                    found = cat
+            # Determine which categories to check based on prefix
+            if display_upper.startswith('US|'):
+                # Check US specific groups and then global groups
+                target_categories = US_CATEGORY_NAMES.union(GLOBAL_CATEGORY_NAMES)
+            elif display_upper.startswith(('MX|', 'MXC|')):
+                # Check Mexico specific groups and then global groups
+                target_categories = MEXICO_CATEGORY_NAMES.union(GLOBAL_CATEGORY_NAMES)
+            else:
+                # Should not happen due to filter, but safe guard
+                target_categories = GLOBAL_CATEGORY_NAMES 
+
+            # Perform the categorization check
+            for cat_name in target_categories:
+                keywords = CATEGORIES.get(cat_name)
+                if keywords and any(kw in display_lower for kw in keywords):
+                    found = cat_name
                     break
             
-            # --- 4. Fallback Logic ---
+            # --- 4. Fallback Logic (General Groups) ---
             if not found:
                 # If no specific category matched, assign to the correct General group
                 if display_upper.startswith('US|'):
                     found = "USA General"
-                elif display_upper.startswith('MX|') or display_upper.startswith('MXC|'):
-                    # Assigns to Mexico General if no specific Mexico category was matched
+                elif display_upper.startswith(('MX|', 'MXC|')):
                     found = "Mexico General" 
                 else:
-                    found = "Other General" # Should not happen, but safe fallback
+                    found = "Other General" 
             
             # --- 5. Yield the Organized Channel ---
             new_ext = add_group_title(current_ext, found)
