@@ -289,16 +289,3 @@ def get_m3u():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000)) 
     app.run(host="0.0.0.0", port=port)
-```eof
-
-***
-
-### 🛑 Critical Final Step: Dependencies
-
-For this code to work, you must update your `requirements.txt` file and set the `GEMINI_API_KEY`.
-
-1.  **Update `requirements.txt`:** Ensure this dependency is added:
-    ```
-    google-genai
-    ```
-2.  **Render Environment Variable:** Set the **`GEMINI_API_KEY`** environment variable on your Render dashboard.
