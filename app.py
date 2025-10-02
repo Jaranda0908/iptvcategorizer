@@ -14,7 +14,7 @@ EXTINF_REGEX = re.compile(r'^(#EXTINF:[^,]*)(?:,)(.*)', re.IGNORECASE)
 TVG_URL_REGEX = re.compile(r'url-tvg="([^"]+)"', re.IGNORECASE)
 
 # --- LLM API Configuration ---
-# NOTE: GEMINI_API_KEY is retrieved from environment variables
+# NOTE: GEMINI_API_KEY must be set in Render environment variables
 GEMINI_MODEL = "gemini-2.5-flash" 
 GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/"
 
@@ -25,7 +25,7 @@ CATEGORIES = {
     "USA News": ["chicago", "illinois", "chgo"], 
     "USA Movies": ["hbo", "cinemax", "starz", "amc", "showtime", "tcm", "movie", "films", "cine", "mgm", "indieplex", "lmn", "lifetime movies"],
     "USA Kids": ["cartoon", "nick", "disney", "boomerang", "pbskids", "disney jr", "cartoonito"],
-    # US LATINO: Expanded for maximum capture and stability (no LLM check needed here)
+    # US LATINO: Expanded for maximum capture and stability
     "US LATINO": [
         "telemundo", "univision", "uni mas", "unimas", "galavision", "hispana", "latino", "spanish",
         "estrella tv", "america teve", "cnn en español", "fox deportes", "mega tv", "mtv tres", 
@@ -33,28 +33,31 @@ CATEGORIES = {
         "cinelatino", "cine estrella", "teleritmo", "bandamax", "de pelicula", "pasiones tv", "mas chic", 
         "vme", "hitn", "tele n"
     ],
-    "Documentary": ["nat geo", "discovery", "history", "documentary", "science", "animal planet", "id", "investigation", "crime", "hgtv", "cooking channel", "food network", "fyi"],
-    "Adult": ["xxx", "porn", "adult", "eros"],
     
     # MEXICO CATEGORIES 
     "Mexico News": ["televisa", "tv azteca", "milenio", "imagen", "foro tv", "forotv", "noticias", "news"],
-    "Mexico Movies": ["cine", "canal 5", "canal once", "cinema", "peliculas"],
+    "Mexico General": [
+        "las estrellas", "azteca uno", "canal 2", "televisa", "azteca", "canal 4", "general", # General
+        "cine", "canal 5", "canal once", "cinema", "peliculas", # Movies
+        "mexico", "telemundo", "univision", "uni mas", "unimas", # Latino
+        "sports", "futbol", "fútbol" # Sports (Since sports were removed from global categories)
+    ],
     "Mexico Kids": ["cartoon", "nick", "disney", "boomerang", "pbskids", "infantil", "ninos", "niños", "discovery kids", "cartoonito", "junior", "kids"],
-    "Mexico General": ["las estrellas", "azteca uno", "canal 2", "televisa", "azteca", "canal 4", "general"],
     
     # GLOBAL/SPORTS CATEGORIES (US-priority sports only)
     "Sports": ["sports", "football", "baseball", "basketball", "soccer", "tennis", "golf", "fighting", "nba", "nfl", "mlb", "espn"],
     
-    # GENERAL/MISC: Catches all remaining US networks not covered above
+    # GENERAL/MISC: Catches all remaining US networks (Documentary, General Entertainment, etc.)
     "USA General": ["general", "entertainment", "local", "abc", "cbs", "fox", "nbc", "pbs", "a&e", "bravo", "cmt", "comedy central", "e! entertainment", 
                     "freeform", "fx", "fxx", "fyi", "hln", "ion", "ion plus", "lifetime", "logo", "mav tv", "me tv", 
                     "mtv", "vice", "bet", "gsn", "txa21", "wciu", "the u", "cozi", "grit", "get tv", "buzzr", 
-                    "news", "weather"],
+                    "news", "weather", "documentary", "history", "science", "travel", "animal planet", "id", 
+                    "investigation", "crime", "hgtv", "cooking channel", "food network"],
 }
 
 # --- Category Sets for Logic Flow ---
-US_CATEGORY_NAMES = {"USA News", "USA Movies", "USA Kids", "US LATINO", "Documentary", "Adult", "Sports", "USA General"}
-MEXICO_CATEGORY_NAMES = {"Mexico News", "Mexico Movies", "Mexico Kids", "Mexico General"}
+US_CATEGORY_NAMES = {"USA News", "USA Movies", "USA Kids", "US LATINO", "Documentary", "Sports", "USA General"}
+MEXICO_CATEGORY_NAMES = {"Mexico News", "Mexico General", "Mexico Kids"}
 # --- End Category Sets ---
 
 # Acceptable prefixes for initial filtering
@@ -80,7 +83,7 @@ def get_llm_category(channel_name, api_key):
         "You are an expert M3U playlist categorizer. Your task is to verify if a US NEWS channel is local to Chicago or Illinois. "
         "Use Google Search to confirm the channel's market. "
         "If the channel is local to CHICAGO or ILLINOIS, categorize it as 'USA News'. "
-        "If it is NATIONAL (CNN, FOX, etc.) or local to ANY OTHER state (NY, CA, FL, etc.), you MUST categorize it as 'USA General'. "
+        "If it is NATIONAL (CNN, FOX, MSNBC, Weather Channel, etc.) or local to ANY OTHER state (NY, CA, FL, etc.), you MUST categorize it as 'USA General'. "
         "Output ONLY the single BEST matching group title from this list: "
         f"{target_list_str}. Do not provide any explanation, comments, or extra text."
     )
@@ -98,14 +101,13 @@ def get_llm_category(channel_name, api_key):
     }
 
     try:
-        # Short timeout for stability
         response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=25) 
         response.raise_for_status()
         
         result = response.json()
+        
         text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '').strip()
         
-        # Only return a valid category name
         if text in target_set:
             return text
         
@@ -194,13 +196,12 @@ def stream_and_categorize(lines_iterator, tvg_url=None, api_key=None):
                     found = cat_name
                     break
             
-            # --- 4. Targeted LLM Check (News Compliance Only) ---
+            # --- 4. Targeted LLM Check (News Compliance ONLY) ---
             
             needs_llm_check = False
             # Trigger LLM ONLY if US channel and it contains a general News keyword
             if region_prefix == 'US' and api_key and ("news" in display_lower or "weather" in display_lower or "noticias" in display_lower):
                 
-                # Check if it was already categorized by a highly specific keyword (e.g., 'hbo')
                 # If it wasn't specifically categorized AND it contains a news word, send it to LLM
                 if not found:
                      needs_llm_check = True
@@ -304,3 +305,4 @@ def get_m3u():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000)) 
     app.run(host="0.0.0.0", port=port)
+    
