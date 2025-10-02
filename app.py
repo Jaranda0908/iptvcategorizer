@@ -1,35 +1,28 @@
 from flask import Flask, Response
 import requests
-import threading
-import time
 
 app = Flask(__name__)
 
-# Your remote M3U URL
+# ===== Replace this with your actual M3U URL =====
 M3U_URL = "http://line.premiumpowers.net/get.php?username=1d0c233137&password=5bcc23b7e8&type=m3u_plus&output=ts"
 
-# Cache settings
-cached_m3u = None
-cache_timestamp = 0
-CACHE_DURATION = 300  # seconds, i.e., refresh every 5 minutes
+# Cache variable
+M3U_CACHE = None
 
-def update_cache():
-    global cached_m3u, cache_timestamp
-    while True:
-        try:
-            r = requests.get(M3U_URL, timeout=30)  # fetch with short timeout
-            if r.status_code == 200:
-                cached_m3u = r.text
-                cache_timestamp = time.time()
-                print("M3U cache updated")
-            else:
-                print(f"Failed to fetch M3U: {r.status_code}")
-        except Exception as e:
-            print(f"Error fetching M3U: {e}")
-        time.sleep(CACHE_DURATION)
+def fetch_m3u():
+    global M3U_CACHE
+    try:
+        print("Fetching M3U playlist...")
+        r = requests.get(M3U_URL, timeout=15)  # 15 seconds timeout
+        r.raise_for_status()
+        M3U_CACHE = r.text
+        print("M3U fetched successfully!")
+    except Exception as e:
+        print("Error fetching M3U:", e)
+        M3U_CACHE = None
 
-# Start background cache thread
-threading.Thread(target=update_cache, daemon=True).start()
+# Fetch once at startup
+fetch_m3u()
 
 @app.route("/")
 def home():
@@ -37,22 +30,11 @@ def home():
 
 @app.route("/m3u")
 def get_m3u():
-    global cached_m3u, cache_timestamp
-    # If cache is empty, try to fetch once more
-    if not cached_m3u:
-        try:
-            r = requests.get(M3U_URL, timeout=10)
-            if r.status_code == 200:
-                cached_m3u = r.text
-                cache_timestamp = time.time()
-            else:
-                return "Failed to fetch M3U", 500
-        except Exception as e:
-            return f"Error fetching M3U: {e}", 500
-
-    return Response(cached_m3u, mimetype="application/x-mpegURL")
+    if M3U_CACHE:
+        return Response(M3U_CACHE, mimetype="audio/x-mpegurl")
+    else:
+        return "M3U not available", 503
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
-
-
+    # Local development only
+    app.run(host="0.0.0.0", port=5000, debug=True)
