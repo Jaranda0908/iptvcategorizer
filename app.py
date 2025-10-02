@@ -77,7 +77,7 @@ def get_m3u():
             return Response("USERNAME or PASSWORD not set in environment variables", mimetype="text/plain")
 
         m3u_url = f"http://line.premiumpowers.net/get.php?username={username}&password={password}&type=m3u_plus&output=ts"
-        r = requests.get(m3u_url, timeout=30)
+        r = requests.get(m3u_url, timeout=600)
         r.raise_for_status()
         lines = r.text.splitlines()
         organized_lines = parse_and_clean(lines)
@@ -89,3 +89,4 @@ def get_m3u():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))  # Use Render's port
     app.run(host="0.0.0.0", port=port)
+
