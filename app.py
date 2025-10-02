@@ -2,16 +2,20 @@ from flask import Flask, Response
 import requests
 import re
 import os
-import itertools # <-- NEW IMPORT
+import itertools
+import json # <-- NEW IMPORT for handling API data
 
 # Initialize the Flask web application
 app = Flask(__name__)
 
+# --- LLM API Setup ---
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") # NEW REQUIRED ENVIRONMENT VARIABLE
+
 # Regex to capture attributes (Group 1) and display name (Group 2)
-# This captures everything up to the last comma as attributes, and the rest as display name
 EXTINF_REGEX = re.compile(r'^(#EXTINF:[^,]*)(?:,)(.*)', re.IGNORECASE)
 
-# ======== Categories ========
+# ======== Categories (Your pre-defined groups remain for fast access) ========
 CATEGORIES = {
     "USA News": ["cnn", "fox news", "msnbc", "nbc news", "abc news", "cbs news"],
     "USA Movies": ["hbo", "cinemax", "starz", "amc", "showtime", "tcm", "movie"],
@@ -39,70 +43,127 @@ CATEGORIES = {
 def add_group_title(extinf_line, category):
     """Adds or replaces the 'group-title' attribute."""
     if 'group-title' in extinf_line.lower():
-        # Replace existing group-title
         return re.sub(r'group-title=".*?"', f'group-title="{category}"', extinf_line, count=1, flags=re.IGNORECASE)
     
     match = EXTINF_REGEX.match(extinf_line)
     if match:
         attributes = match.group(1).strip()
         display_name = match.group(2).strip()
-        # Insert group-title before the final comma and display name
         return f'{attributes} group-title="{category}",{display_name}'
 
     return extinf_line
 
+def get_llm_category(channel_name):
+    """Uses Gemini with Google Search to categorize a channel name, returning a string category."""
+    if not GEMINI_API_KEY:
+        return None
+
+    # System instruction guides the LLM to output a single, usable category
+    system_prompt = "You are an IPTV channel categorization engine. Analyze the channel name. Use Google Search to find its primary region, language, and genre. Output ONLY a single, descriptive category name (e.g., 'French News', 'USA Kids', 'Global Sports'). If categorization is impossible, output 'Uncategorized'."
+    
+    user_query = f"Categorize the channel: {channel_name}"
+    
+    payload = {
+        "contents": [{"parts": [{"text": user_query}]}],
+        "tools": [{"google_search": {}}],
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+    }
+    
+    headers = {'Content-Type': 'application/json'}
+    
+    try:
+        # Set a reasonable timeout for the API call (20s is plenty for text generation)
+        response = requests.post(
+            f"{GEMINI_API_URL}?key={GEMINI_API_KEY}", 
+            headers=headers, 
+            data=json.dumps(payload),
+            timeout=20 
+        )
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'Uncategorized').strip()
+        
+        if text.lower() == 'uncategorized' or not text:
+            return None
+            
+        return text.replace('"', '').strip()
+        
+    except Exception as e:
+        print(f"Gemini categorization failed for '{channel_name}': {e}")
+        return None
+
 def stream_and_categorize(lines_iterator):
     """
-    A generator function that processes the M3U line-by-line (streaming)
-    to avoid running out of memory.
+    Processes the M3U line-by-line, prioritizing keywords, then using the LLM for smart categorization, 
+    and finally filtering based on your desired regions.
     """
-    # 1. Yield the required header immediately
     yield '#EXTM3U\n'
 
     current_ext = None
     
-    # 2. Iterate through lines as they are received
     for raw_line in lines_iterator:
         try:
-            # Decode the line from bytes to string
             line = raw_line.decode('utf-8').strip()
         except UnicodeDecodeError:
-            continue # Skip lines that can't be decoded
+            continue
 
         if line.startswith('#EXTINF'):
             current_ext = line
-            # Continue to the next line to find the stream URL
             continue
         
-        # 3. If the line is a stream URL and follows an #EXTINF line
         if current_ext and (line.startswith('http') or line.startswith('rtmp')):
-            # Process the channel name for categorization
+            
             match = EXTINF_REGEX.match(current_ext)
             if not match:
                 current_ext = None
                 continue
                 
-            display = match.group(2).strip().lower()
+            display = match.group(2).strip()
+            display_lower = display.lower()
             
             found = None
-            # Find the category based on keywords
+            
+            # 1. KEYWORD CHECK (FAST)
             for cat, keywords in CATEGORIES.items():
-                if any(kw in display for kw in keywords):
+                if any(kw in display_lower for kw in keywords):
                     found = cat
                     break
             
-            # If categorized, yield the modified #EXTINF line and the URL
-            if found:
-                new_ext = add_group_title(current_ext, found)
-                yield new_ext + '\n'
-                yield line + '\n'
+            # 2. SMART LLM CHECK (SLOW, uses API)
+            if not found and GEMINI_API_KEY:
+                # The LLM categorization runs only if the fast keyword check failed
+                llm_category = get_llm_category(display)
+                if llm_category:
+                    found = llm_category # Use the LLM's generated category
 
-            # Reset the state for the next channel pair
+            # === FINAL FILTERING LOGIC ===
+            
+            # If no category was found (keyword or LLM), skip this channel.
+            if not found:
+                current_ext = None
+                continue
+            
+            # If the category found is NOT one of our predefined US/Mexico groups, 
+            # we check if the LLM output (stored in 'found') contains US/Mexico regions.
+            if found not in CATEGORIES:
+                # We are checking the LLM-generated string for US or Mexico keywords.
+                llm_cat_lower = found.lower()
+                
+                # If the LLM output is NOT relevant to the user's desired regions, filter it out.
+                if not any(region in llm_cat_lower for region in ['usa', 'us', 'mexico', 'latino', 'spanish']):
+                    current_ext = None
+                    continue
+
+            # If categorized or approved by LLM filter, yield the channel.
+            new_ext = add_group_title(current_ext, found)
+            yield new_ext + '\n'
+            yield line + '\n'
+
             current_ext = None
 
-        # Ignore other lines (like #EXTGRP or comments)
         elif current_ext:
-            # If we had an EXTINF but the next line wasn't a stream, reset
             current_ext = None
 
 # ======== Routes (The Web URLs) ========
@@ -122,7 +183,6 @@ def get_m3u():
         return Response("ERROR: Authentication credentials (USERNAME or PASSWORD) are not set.", mimetype="text/plain", status=500)
 
     # Hardcoded list of IPTV provider hosts for automatic failover
-    # This list ensures maximum reliability since your primary host is slow
     hosts = [
         "http://line.premiumpowers.net",
         "http://servidorgps.org",
@@ -134,23 +194,19 @@ def get_m3u():
     last_error = "No host attempted yet."
     
     for host in hosts:
-        # Construct the full M3U URL for the current host
         m3u_url = f"{host}/get.php?username={username}&password={password}&type=m3u_plus&output=ts"
         print(f"Attempting connection to: {host}")
         
         try:
-            # IMPORTANT: stream=True prevents loading the entire file into memory (fixes 512MB crash)
-            # timeout=300 allows Gunicorn worker 5 full minutes to complete the request
             r = requests.get(m3u_url, timeout=300, stream=True) 
-            r.raise_for_status() # Raise exception for 4xx or 5xx status codes
+            r.raise_for_status()
             
-            # Check for a valid M3U file start without loading the entire content
             lines_iterator = r.iter_lines()
             first_line = next(lines_iterator, b'').decode('utf-8').strip()
             
             if first_line.startswith('#EXTM3U'):
                 successful_response = r
-                break # Success! Stop trying other hosts
+                break
             else:
                 last_error = f"Host {host} returned content that didn't start with #EXTM3U."
                 print(last_error)
@@ -158,18 +214,13 @@ def get_m3u():
         except requests.exceptions.RequestException as e:
             last_error = f"Host {host} failed with error: {e}"
             print(last_error)
-            # Continue to the next host
 
-    # If a successful streaming response was found, pass it to the generator
     if successful_response:
-        # FIX: Use itertools.chain to combine the first line with the rest of the stream
-        # This avoids the fatal list() call that caused the memory crash.
         lines_to_process = itertools.chain([first_line.encode('utf-8')], successful_response.iter_lines())
         
-        # Flask Response streams the output using the generator, consuming minimal memory
+        # Flask Response streams the output using the generator
         return Response(stream_and_categorize(lines_to_process), mimetype="application/x-mpegurl")
     else:
-        # All hosts failed
         print("FATAL: All hosts failed to return a valid M3U file.")
         return Response(f"Error: Could not retrieve a valid M3U from any host. Last error: {last_error}", mimetype="text/plain", status=503)
 
