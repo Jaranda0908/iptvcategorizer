@@ -2,6 +2,7 @@ from flask import Flask, Response
 import requests
 import re
 import os
+import itertools # <-- NEW IMPORT
 
 # Initialize the Flask web application
 app = Flask(__name__)
@@ -161,11 +162,12 @@ def get_m3u():
 
     # If a successful streaming response was found, pass it to the generator
     if successful_response:
-        # Chain the first line back onto the stream for the generator
-        lines_to_process = [first_line.encode('utf-8')] + list(successful_response.iter_lines())
+        # FIX: Use itertools.chain to combine the first line with the rest of the stream
+        # This avoids the fatal list() call that caused the memory crash.
+        lines_to_process = itertools.chain([first_line.encode('utf-8')], successful_response.iter_lines())
         
         # Flask Response streams the output using the generator, consuming minimal memory
-        return Response(stream_and_categorize(iter(lines_to_process)), mimetype="application/x-mpegurl")
+        return Response(stream_and_categorize(lines_to_process), mimetype="application/x-mpegurl")
     else:
         # All hosts failed
         print("FATAL: All hosts failed to return a valid M3U file.")
