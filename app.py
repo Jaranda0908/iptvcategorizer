@@ -9,15 +9,18 @@ import time # Used for retry logic delay
 app = Flask(__name__)
 
 # Regex to capture attributes (Group 1) and display name (Group 2)
+# NOTE: This only captures attributes up to the comma, the display name is Group 2
 EXTINF_REGEX = re.compile(r'^(#EXTINF:[^,]*)(?:,)(.*)', re.IGNORECASE)
 
 # ======== Categories (Customized Final List) ========
 CATEGORIES = {
-    # USA CATEGORIES
+    # USA CATEGORIES (Documentary/Adult are now US-exclusive)
     "USA News": ["cnn", "fox news", "msnbc", "nbc news", "abc news", "cbs news", "chicago", "illinois"],
     "USA Movies": ["hbo", "cinemax", "starz", "amc", "showtime", "tcm", "movie", "christmas"],
     "USA Kids": ["cartoon", "nick", "disney", "boomerang", "pbskids"],
     "US LATINO": ["telemundo", "univision", "uni mas", "unimas", "galavision", "hispana"],
+    "Documentary": ["nat geo", "discovery", "history", "documentary"],
+    "Adult": ["xxx", "porn", "adult", "eros"],
     
     # MEXICO CATEGORIES
     "Mexico News": ["televisa", "tv azteca", "milenio", "imagen", "foro tv", "forotv"],
@@ -25,7 +28,7 @@ CATEGORIES = {
     "Mexico Kids": ["canal once niños", "bitme", "kids mexico"],
     "Mexico General": ["las estrellas", "azteca uno", "canal 2", "televisa"],
     
-    # GLOBAL CATEGORIES (Can apply to US or MX streams if keyword is present)
+    # GLOBAL CATEGORIES (Sports, eSports - can be US or MX)
     "Basketball": ["nba", "basketball"],
     "Football": ["nfl", "football", "college football", "espn college"],
     "Baseball": ["mlb", "baseball"],
@@ -34,38 +37,24 @@ CATEGORIES = {
     "Golf": ["golf", "pga"],
     "Fighting": ["ufc", "boxing", "mma", "wwe", "fight"],
     "eSports": ["esports", "gaming", "twitch"],
-    "Documentary": ["nat geo", "discovery", "history", "documentary"],
-    "Adult": ["xxx", "porn", "adult", "eros"]
 }
 
-# Acceptable prefixes for initial filtering (includes your custom MXC|)
+# Acceptable prefixes for initial filtering
 ACCEPTABLE_PREFIXES = ('US|', 'MX|', 'MXC|')
 
 # Define which categories belong to which region for prioritization
-US_CATEGORY_NAMES = {"USA News", "USA Movies", "USA Kids", "US LATINO"}
+US_CATEGORY_NAMES = {"USA News", "USA Movies", "USA Kids", "US LATINO", "Documentary", "Adult"}
 MEXICO_CATEGORY_NAMES = {"Mexico News", "Mexico Movies", "Mexico Kids", "Mexico General"}
+# GLOBAL_CATEGORY_NAMES only includes sports, eSports, etc.
 GLOBAL_CATEGORY_NAMES = CATEGORIES.keys() - US_CATEGORY_NAMES - MEXICO_CATEGORY_NAMES
 
 
-# ======== Helper Functions ========
-
-def add_group_title(extinf_line, category):
-    """Adds or replaces the 'group-title' attribute."""
-    if 'group-title' in extinf_line.lower():
-        return re.sub(r'group-title=".*?"', f'group-title="{category}"', extinf_line, count=1, flags=re.IGNORECASE)
-    
-    match = EXTINF_REGEX.match(extinf_line)
-    if match:
-        attributes = match.group(1).strip()
-        display_name = match.group(2).strip()
-        return f'{attributes} group-title="{category}",{display_name}'
-
-    return extinf_line
+# ======== Core Processing Function (Simplified & Optimized) ========
 
 def stream_and_categorize(lines_iterator):
     """
     Generator that processes the M3U line-by-line, filtering by prefix,
-    categorizing using prefix priority, and removing duplicates.
+    categorizing using prefix priority, removing duplicates, and stripping prefixes.
     """
     seen_streams = set()
     yield '#EXTM3U\n'
@@ -105,40 +94,53 @@ def stream_and_categorize(lines_iterator):
             
             seen_streams.add(line)
 
-            # --- 3. Categorization Logic (Prefix Priority) ---
-            found = None
+            # --- 3. Determine Target Categories based on Prefix ---
             
-            # Determine which categories to check based on prefix
             if display_upper.startswith('US|'):
-                # Check US specific groups and then global groups
+                # US streams check US categories (including Documentary/Adult) and Global categories
                 target_categories = US_CATEGORY_NAMES.union(GLOBAL_CATEGORY_NAMES)
+                is_mexican_stream = False
             elif display_upper.startswith(('MX|', 'MXC|')):
-                # Check Mexico specific groups and then global groups
+                # Mexican streams check Mexico categories and Global categories (NO US-only groups like Documentary)
                 target_categories = MEXICO_CATEGORY_NAMES.union(GLOBAL_CATEGORY_NAMES)
+                is_mexican_stream = True
             else:
-                # Should not happen due to filter, but safe guard
-                target_categories = GLOBAL_CATEGORY_NAMES 
+                current_ext = None 
+                continue # Should be caught by prefix filter, but skip anyway
 
-            # Perform the categorization check
+            # --- 4. Categorization Check ---
+            found = None
             for cat_name in target_categories:
                 keywords = CATEGORIES.get(cat_name)
                 if keywords and any(kw in display_lower for kw in keywords):
                     found = cat_name
                     break
             
-            # --- 4. Fallback Logic (General Groups) ---
+            # --- 5. Fallback Logic (General Groups) ---
             if not found:
-                # If no specific category matched, assign to the correct General group
-                if display_upper.startswith('US|'):
-                    found = "USA General"
-                elif display_upper.startswith(('MX|', 'MXC|')):
+                if is_mexican_stream:
                     found = "Mexico General" 
                 else:
-                    found = "Other General" 
+                    found = "USA General" 
             
-            # --- 5. Yield the Organized Channel ---
-            new_ext = add_group_title(current_ext, found)
-            yield new_ext + '\n'
+            # --- 6. Final Formatting and Prefix Removal ---
+            
+            # Strip the prefix from the display name for a clean look
+            new_display_name = display_name
+            for prefix in ACCEPTABLE_PREFIXES:
+                if new_display_name.upper().startswith(prefix):
+                    # Strip the prefix and any optional space after it
+                    new_display_name = new_display_name[len(prefix):].lstrip()
+                    break
+
+            # Extract attributes from current_ext (Group 1 of EXTINF_REGEX)
+            attributes = display_match.group(1).strip()
+            
+            # Rebuild the #EXTINF line with the new, clean display name and group title
+            modified_ext_line = f'{attributes} group-title="{found}",{new_display_name}'
+            
+            # --- 7. Yield the Organized Channel ---
+            yield modified_ext_line + '\n'
             yield line + '\n'
 
             current_ext = None
