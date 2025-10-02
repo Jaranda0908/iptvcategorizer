@@ -1,92 +1,56 @@
 from flask import Flask, Response
 import requests
-import re
-import os
-from collections import defaultdict
+import threading
+import time
 
 app = Flask(__name__)
 
-# ======== Categories ========
-CATEGORIES = {
-    "USA News": ["cnn", "fox news", "msnbc", "nbc news", "abc news", "cbs news"],
-    "USA Movies": ["hbo", "cinemax", "starz", "amc", "showtime", "tcm", "movie"],
-    "USA Kids": ["cartoon", "nick", "disney", "boomerang", "pbskids"],
-    "USA General": ["abc", "nbc", "cbs", "fox", "pbs"],
-    "Mexico News": ["televisa", "tv azteca", "milenio", "imagen", "foro tv", "forotv"],
-    "Mexico Movies": ["cine", "canal 5", "canal once", "cinema"],
-    "Mexico Kids": ["canal once niños", "bitme", "kids mexico"],
-    "Mexico General": ["las estrellas", "azteca uno", "canal 2", "televisa"],
-    "Basketball": ["nba", "basketball"],
-    "Football": ["nfl", "football", "college football", "espn college"],
-    "Baseball": ["mlb", "baseball"],
-    "Soccer": ["soccer", "futbol", "fútbol", "liga mx", "champions", "premier league", "laliga"],
-    "Tennis": ["tennis", "atp", "wta"],
-    "Golf": ["golf", "pga"],
-    "Fighting": ["ufc", "boxing", "mma", "wwe", "fight"],
-    "eSports": ["esports", "gaming", "twitch"],
-    "Music": ["mtv", "vh1", "music", "radio"],
-    "Documentary": ["nat geo", "discovery", "history", "documentary"],
-    "Adult": ["xxx", "porn", "adult", "eros"]
-}
+# Your remote M3U URL
+M3U_URL = "http://YOUR_REMOTE_M3U_LINK_HERE"
 
-# ======== Helper Functions ========
-def add_group_title(extinf_line, category):
-    if 'group-title' in extinf_line:
-        return re.sub(r'group-title=".*?"', f'group-title="{category}"', extinf_line, count=1)
-    m = re.match(r'(#EXTINF:[^\n\r]*?)(,)(.*)', extinf_line)
-    if m:
-        return f'{m.group(1)} group-title="{category}"{m.group(2)}{m.group(3)}'
-    return extinf_line.rstrip('\n') + f' group-title="{category}"\n'
+# Cache settings
+cached_m3u = None
+cache_timestamp = 0
+CACHE_DURATION = 300  # seconds, i.e., refresh every 5 minutes
 
-def parse_and_clean(lines):
-    organized = ['#EXTM3U']
-    i = 0
-    while i < len(lines):
-        line = lines[i].rstrip('\n')
-        if line.strip().startswith('#EXTINF'):
-            ext = line
-            display = ext.split(',')[-1].strip().lower()
-            stream = lines[i+1].rstrip('\n') if (i+1) < len(lines) else ''
-            found = None
-            for cat, keywords in CATEGORIES.items():
-                if any(kw in display for kw in keywords):
-                    found = cat
-                    break
-            if not found:
-                i += 2
-                continue
-            new_ext = add_group_title(ext, found)
-            organized.append(new_ext)
-            organized.append(stream)
-            i += 2
-        else:
-            i += 1
-    return organized
+def update_cache():
+    global cached_m3u, cache_timestamp
+    while True:
+        try:
+            r = requests.get(M3U_URL, timeout=30)  # fetch with short timeout
+            if r.status_code == 200:
+                cached_m3u = r.text
+                cache_timestamp = time.time()
+                print("M3U cache updated")
+            else:
+                print(f"Failed to fetch M3U: {r.status_code}")
+        except Exception as e:
+            print(f"Error fetching M3U: {e}")
+        time.sleep(CACHE_DURATION)
 
-# ======== Routes ========
+# Start background cache thread
+threading.Thread(target=update_cache, daemon=True).start()
+
 @app.route("/")
 def home():
     return "Flask app is running! Visit /m3u for your playlist."
 
 @app.route("/m3u")
 def get_m3u():
-    try:
-        username = os.environ.get("USERNAME")
-        password = os.environ.get("PASSWORD")
-        if not username or not password:
-            return Response("USERNAME or PASSWORD not set in environment variables", mimetype="text/plain")
+    global cached_m3u, cache_timestamp
+    # If cache is empty, try to fetch once more
+    if not cached_m3u:
+        try:
+            r = requests.get(M3U_URL, timeout=10)
+            if r.status_code == 200:
+                cached_m3u = r.text
+                cache_timestamp = time.time()
+            else:
+                return "Failed to fetch M3U", 500
+        except Exception as e:
+            return f"Error fetching M3U: {e}", 500
 
-        m3u_url = f"http://line.premiumpowers.net/get.php?username={username}&password={password}&type=m3u_plus&output=ts"
-        r = requests.get(m3u_url, timeout=600)
-        r.raise_for_status()
-        lines = r.text.splitlines()
-        organized_lines = parse_and_clean(lines)
-        return Response("\n".join(organized_lines), mimetype="text/plain")
-    except Exception as e:
-        return Response(f"Error fetching playlist: {e}", mimetype="text/plain")
+    return Response(cached_m3u, mimetype="application/x-mpegURL")
 
-# ======== Run App ========
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))  # Use Render's port
-    app.run(host="0.0.0.0", port=port)
-
+    app.run(host="0.0.0.0", port=5000)
