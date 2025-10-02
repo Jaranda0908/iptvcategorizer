@@ -7,6 +7,7 @@ import os
 app = Flask(__name__)
 
 # Regex to capture attributes (Group 1) and display name (Group 2)
+# This captures everything up to the last comma as attributes, and the rest as display name
 EXTINF_REGEX = re.compile(r'^(#EXTINF:[^,]*)(?:,)(.*)', re.IGNORECASE)
 
 # ======== Categories ========
@@ -37,12 +38,14 @@ CATEGORIES = {
 def add_group_title(extinf_line, category):
     """Adds or replaces the 'group-title' attribute."""
     if 'group-title' in extinf_line.lower():
+        # Replace existing group-title
         return re.sub(r'group-title=".*?"', f'group-title="{category}"', extinf_line, count=1, flags=re.IGNORECASE)
     
     match = EXTINF_REGEX.match(extinf_line)
     if match:
         attributes = match.group(1).strip()
         display_name = match.group(2).strip()
+        # Insert group-title before the final comma and display name
         return f'{attributes} group-title="{category}",{display_name}'
 
     return extinf_line
@@ -60,6 +63,7 @@ def stream_and_categorize(lines_iterator):
     # 2. Iterate through lines as they are received
     for raw_line in lines_iterator:
         try:
+            # Decode the line from bytes to string
             line = raw_line.decode('utf-8').strip()
         except UnicodeDecodeError:
             continue # Skip lines that can't be decoded
@@ -116,7 +120,8 @@ def get_m3u():
     if not username or not password:
         return Response("ERROR: Authentication credentials (USERNAME or PASSWORD) are not set.", mimetype="text/plain", status=500)
 
-    # 1. Hardcoded list of IPTV provider hosts for automatic failover
+    # Hardcoded list of IPTV provider hosts for automatic failover
+    # This list ensures maximum reliability since your primary host is slow
     hosts = [
         "http://line.premiumpowers.net",
         "http://servidorgps.org",
@@ -128,20 +133,23 @@ def get_m3u():
     last_error = "No host attempted yet."
     
     for host in hosts:
+        # Construct the full M3U URL for the current host
         m3u_url = f"{host}/get.php?username={username}&password={password}&type=m3u_plus&output=ts"
         print(f"Attempting connection to: {host}")
         
         try:
-            # 2. IMPORTANT: Use stream=True to prevent loading the entire file into memory
+            # IMPORTANT: stream=True prevents loading the entire file into memory (fixes 512MB crash)
+            # timeout=300 allows Gunicorn worker 5 full minutes to complete the request
             r = requests.get(m3u_url, timeout=300, stream=True) 
-            r.raise_for_status() 
+            r.raise_for_status() # Raise exception for 4xx or 5xx status codes
             
             # Check for a valid M3U file start without loading the entire content
-            first_line = next(r.iter_lines(), b'').decode('utf-8').strip()
+            lines_iterator = r.iter_lines()
+            first_line = next(lines_iterator, b'').decode('utf-8').strip()
             
             if first_line.startswith('#EXTM3U'):
                 successful_response = r
-                break 
+                break # Success! Stop trying other hosts
             else:
                 last_error = f"Host {host} returned content that didn't start with #EXTM3U."
                 print(last_error)
@@ -151,9 +159,9 @@ def get_m3u():
             print(last_error)
             # Continue to the next host
 
-    # 3. If a successful streaming response was found, pass it to the generator
+    # If a successful streaming response was found, pass it to the generator
     if successful_response:
-        # Chain the first line (already read) back onto the rest of the stream
+        # Chain the first line back onto the stream for the generator
         lines_to_process = [first_line.encode('utf-8')] + list(successful_response.iter_lines())
         
         # Flask Response streams the output using the generator, consuming minimal memory
@@ -161,18 +169,9 @@ def get_m3u():
     else:
         # All hosts failed
         print("FATAL: All hosts failed to return a valid M3U file.")
-        return Response(f"Error: Could not retrieve a valid M3U from any backup host. Last error was: {last_error}", mimetype="text/plain", status=503)
+        return Response(f"Error: Could not retrieve a valid M3U from any host. Last error: {last_error}", mimetype="text/plain", status=503)
 
-# ======== Run App (unchanged) ========
+# ======== Run App (for local testing, Render uses Gunicorn) ========
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000)) 
     app.run(host="0.0.0.0", port=port)
-```eof
-
-### Next Step
-
-1.  **Replace** your current `app.py` on GitHub with this code.
-2.  **Commit** the change.
-3.  **Wait** for Render to automatically redeploy.
-
-This is the most robust version, engineered specifically to beat the memory limit, the slow network, and the single-host problem. Once it's Live, you'll be ready for Tivimate!
