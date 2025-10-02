@@ -14,20 +14,24 @@ EXTINF_REGEX = re.compile(r'^(#EXTINF:[^,]*)(?:,)(.*)', re.IGNORECASE)
 TVG_URL_REGEX = re.compile(r'url-tvg="([^"]+)"', re.IGNORECASE)
 
 # --- LLM API Configuration ---
-# NOTE: GEMINI_API_KEY must be set in Render environment variables
+# NOTE: GEMINI_API_KEY is retrieved from environment variables
 GEMINI_MODEL = "gemini-2.5-flash" 
 GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/"
 
-# ======== Categories (Final LLM Target List) ========
+# ======== Categories (Final Exhaustive Keyword List) ========
 CATEGORIES = {
-    # USA CATEGORIES (Targeted) 
+    # USA CATEGORIES 
+    # STRICTLY LOCAL NEWS: Only Chicago/Illinois for manual keyword check
     "USA News": ["chicago", "illinois", "chgo"], 
     "USA Movies": ["hbo", "cinemax", "starz", "amc", "showtime", "tcm", "movie", "films", "cine", "mgm", "indieplex", "lmn", "lifetime movies"],
     "USA Kids": ["cartoon", "nick", "disney", "boomerang", "pbskids", "disney jr", "cartoonito"],
+    # US LATINO: Expanded for maximum capture and stability (no LLM check needed here)
     "US LATINO": [
         "telemundo", "univision", "uni mas", "unimas", "galavision", "hispana", "latino", "spanish",
         "estrella tv", "america teve", "cnn en español", "fox deportes", "mega tv", "mtv tres", 
-        "universo", "wapa america", "uni", "unvsn", "tele m", "telem"
+        "universo", "wapa america", "uni", "unvsn", "tele m", "telem", "tudn", "goltv", "tyc sports", 
+        "cinelatino", "cine estrella", "teleritmo", "bandamax", "de pelicula", "pasiones tv", "mas chic", 
+        "vme", "hitn", "tele n"
     ],
     "Documentary": ["nat geo", "discovery", "history", "documentary", "science", "animal planet", "id", "investigation", "crime", "hgtv", "cooking channel", "food network", "fyi"],
     "Adult": ["xxx", "porn", "adult", "eros"],
@@ -48,44 +52,40 @@ CATEGORIES = {
                     "news", "weather"],
 }
 
-# --- CRITICAL FIX: Define category sets before usage ---
-# These sets are used to check which categories a channel should be checked against
+# --- Category Sets for Logic Flow ---
 US_CATEGORY_NAMES = {"USA News", "USA Movies", "USA Kids", "US LATINO", "Documentary", "Adult", "Sports", "USA General"}
 MEXICO_CATEGORY_NAMES = {"Mexico News", "Mexico Movies", "Mexico Kids", "Mexico General"}
-# GLOBAL_CATEGORY_NAMES is now part of US_CATEGORY_NAMES in the logic flow for simplicity
-# --- END CRITICAL FIX ---
-
+# --- End Category Sets ---
 
 # Acceptable prefixes for initial filtering
 ACCEPTABLE_PREFIXES = ('US|', 'MX|', 'MXC|')
 
 
-# ======== LLM Helper Function (Targeted and Controlled) ========
+# ======== LLM Helper Function (News Compliance Check ONLY) ========
 
-def get_llm_category(channel_name, api_key, region_prefix):
+def get_llm_category(channel_name, api_key):
     """
-    Uses Gemini API for targeted categorization (News and US Latino).
+    Uses Gemini API specifically to confirm if a US NEWS channel is local (Chicago/Illinois).
+    If not, it forces the category to 'USA General'.
     """
     if not api_key:
         return None
     
-    # Define strict category set for LLM to choose from:
-    US_LLM_TARGET_CATEGORIES = {"USA News", "US LATINO", "USA General"}
-    MX_LLM_TARGET_CATEGORIES = {"Mexico General", "Mexico News"}
-    
-    target_set = US_LLM_TARGET_CATEGORIES if region_prefix == 'US' else MX_LLM_TARGET_CATEGORIES
+    # LLM is forced to choose between the compliant category and the non-compliant category
+    target_set = ["USA News", "USA General"]
     target_list_str = f"[{', '.join(target_set)}]"
 
-    # System instruction enforces the local news filter
+    # System instruction enforces the strict local news filter
     system_prompt = (
-        "You are an M3U playlist categorizer. Your primary task is to confirm channel category based on content. "
-        "Use Google Search to verify the channel's type and intended market. "
-        f"If a US NEWS channel is NOT explicitly local (Chicago or Illinois), categorize it as 'USA General'. "
+        "You are an expert M3U playlist categorizer. Your task is to verify if a US NEWS channel is local to Chicago or Illinois. "
+        "Use Google Search to confirm the channel's market. "
+        "If the channel is local to CHICAGO or ILLINOIS, categorize it as 'USA News'. "
+        "If it is NATIONAL (CNN, FOX, etc.) or local to ANY OTHER state (NY, CA, FL, etc.), you MUST categorize it as 'USA General'. "
         "Output ONLY the single BEST matching group title from this list: "
         f"{target_list_str}. Do not provide any explanation, comments, or extra text."
     )
     
-    user_query = f"Categorize this channel name: '{channel_name}'"
+    user_query = f"Categorize this US channel named: '{channel_name}'"
 
     url = f"{GEMINI_API_BASE_URL}{GEMINI_MODEL}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
@@ -98,13 +98,14 @@ def get_llm_category(channel_name, api_key, region_prefix):
     }
 
     try:
+        # Short timeout for stability
         response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=25) 
         response.raise_for_status()
         
         result = response.json()
-        
         text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '').strip()
         
+        # Only return a valid category name
         if text in target_set:
             return text
         
@@ -114,11 +115,27 @@ def get_llm_category(channel_name, api_key, region_prefix):
         print(f"Gemini API call failed for {channel_name}: {e}")
         return None
 
-# ======== Core Processing Function (Targeted LLM) ========
+# ======== Core Processing Function (Final Logic) ========
+
+def add_group_title(extinf_line, category, display_name):
+    """Adds or replaces the 'group-title' attribute and sets the final display name."""
+    if 'group-title' in extinf_line.lower():
+        modified_line = re.sub(r'group-title=".*?"', f'group-title="{category}"', extinf_line, count=1, flags=re.IGNORECASE)
+    else:
+        m = re.match(r'(#EXTINF:[^\n\r]*?)(,)(.*)', extinf_line)
+        if m:
+            attributes = m.group(1)
+            modified_line = f'{attributes} group-title="{category}"{m.group(2)}{m.group(3)}'
+        else:
+            modified_line = extinf_line
+    
+    # Update/Set the clean display name
+    final_line = re.sub(r',.*$', f',{display_name}', modified_line)
+    return final_line
 
 def stream_and_categorize(lines_iterator, tvg_url=None, api_key=None):
     """
-    Generator that processes the M3U line-by-line, using targeted LLM checks.
+    Generator that processes the M3U line-by-line, using targeted LLM checks for News.
     """
     seen_streams = set()
     
@@ -150,7 +167,7 @@ def stream_and_categorize(lines_iterator, tvg_url=None, api_key=None):
             display_upper = display_name.upper()
             display_lower = display_name.lower()
             
-            # --- 1. Crucial Prefix Filter & Region Determination ---
+            # --- 1. Prefix Filter & Region Determination ---
             if display_upper.startswith('US|'):
                 target_categories = US_CATEGORY_NAMES
                 fallback_category = "USA General"
@@ -167,7 +184,6 @@ def stream_and_categorize(lines_iterator, tvg_url=None, api_key=None):
             if line in seen_streams:
                 current_ext = None 
                 continue
-            
             seen_streams.add(line)
 
             # --- 3. Keyword Categorization (Priority Check) ---
@@ -178,24 +194,22 @@ def stream_and_categorize(lines_iterator, tvg_url=None, api_key=None):
                     found = cat_name
                     break
             
-            # --- 4. Targeted LLM Check (News and Latino Only) ---
-            
-            # Spanish words used to trigger the LLM for inspection
-            spanish_llm_triggers = ["noticias", "programas", "canal", "novela", "latino", "spanish", "tele", "univision"]
+            # --- 4. Targeted LLM Check (News Compliance Only) ---
             
             needs_llm_check = False
-            if region_prefix == 'US' and api_key:
-                # 1. Check for News words
-                if ("news" in display_lower or "weather" in display_lower):
-                    needs_llm_check = True
-                # 2. Check for Spanish/Latino words (using whole words/prefixes for 'tele')
-                elif any(kw in display_lower for kw in spanish_llm_triggers):
-                    needs_llm_check = True
-            
-            if not found and needs_llm_check:
-                llm_category = get_llm_category(display_name, api_key, region_prefix)
+            # Trigger LLM ONLY if US channel and it contains a general News keyword
+            if region_prefix == 'US' and api_key and ("news" in display_lower or "weather" in display_lower or "noticias" in display_lower):
+                
+                # Check if it was already categorized by a highly specific keyword (e.g., 'hbo')
+                # If it wasn't specifically categorized AND it contains a news word, send it to LLM
+                if not found:
+                     needs_llm_check = True
+
+            if needs_llm_check:
+                llm_category = get_llm_category(display_name, api_key)
                 if llm_category:
                     found = llm_category
+                # Note: If LLM fails or returns None, 'found' remains None and falls to the fallback group.
 
             # --- 5. Final Category Assignment and Prefix Removal ---
             
@@ -208,7 +222,7 @@ def stream_and_categorize(lines_iterator, tvg_url=None, api_key=None):
                     break
 
             attributes = display_match.group(1).strip()
-            modified_ext_line = f'{attributes} group-title="{final_group}",{new_display_name}'
+            modified_ext_line = add_group_title(current_ext, final_group, new_display_name)
             
             yield modified_ext_line + '\n'
             yield line + '\n'
