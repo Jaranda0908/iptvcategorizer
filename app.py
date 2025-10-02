@@ -3,20 +3,22 @@ import requests
 import re
 import os
 import itertools
-import json # <-- NEW IMPORT for handling API data
+import json
+import time # <-- NEW IMPORT for retries
 
 # Initialize the Flask web application
 app = Flask(__name__)
 
 # --- LLM API Setup ---
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent"
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") # NEW REQUIRED ENVIRONMENT VARIABLE
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") 
 
 # Regex to capture attributes (Group 1) and display name (Group 2)
 EXTINF_REGEX = re.compile(r'^(#EXTINF:[^,]*)(?:,)(.*)', re.IGNORECASE)
 
 # ======== Categories (Your pre-defined groups remain for fast access) ========
 CATEGORIES = {
+    # ... (Your categories are unchanged) ...
     "USA News": ["cnn", "fox news", "msnbc", "nbc news", "abc news", "cbs news"],
     "USA Movies": ["hbo", "cinemax", "starz", "amc", "showtime", "tcm", "movie"],
     "USA Kids": ["cartoon", "nick", "disney", "boomerang", "pbskids"],
@@ -38,10 +40,10 @@ CATEGORIES = {
     "Adult": ["xxx", "porn", "adult", "eros"]
 }
 
-# ======== Helper Functions ========
+# ======== Helper Functions (Unchanged) ========
 
 def add_group_title(extinf_line, category):
-    """Adds or replaces the 'group-title' attribute."""
+    # ... (Unchanged logic) ...
     if 'group-title' in extinf_line.lower():
         return re.sub(r'group-title=".*?"', f'group-title="{category}"', extinf_line, count=1, flags=re.IGNORECASE)
     
@@ -54,13 +56,11 @@ def add_group_title(extinf_line, category):
     return extinf_line
 
 def get_llm_category(channel_name):
-    """Uses Gemini with Google Search to categorize a channel name, returning a string category."""
+    # ... (Unchanged logic for LLM API call) ...
     if not GEMINI_API_KEY:
         return None
 
-    # System instruction guides the LLM to output a single, usable category
     system_prompt = "You are an IPTV channel categorization engine. Analyze the channel name. Use Google Search to find its primary region, language, and genre. Output ONLY a single, descriptive category name (e.g., 'French News', 'USA Kids', 'Global Sports'). If categorization is impossible, output 'Uncategorized'."
-    
     user_query = f"Categorize the channel: {channel_name}"
     
     payload = {
@@ -72,7 +72,6 @@ def get_llm_category(channel_name):
     headers = {'Content-Type': 'application/json'}
     
     try:
-        # Set a reasonable timeout for the API call (20s is plenty for text generation)
         response = requests.post(
             f"{GEMINI_API_URL}?key={GEMINI_API_KEY}", 
             headers=headers, 
@@ -94,11 +93,9 @@ def get_llm_category(channel_name):
         print(f"Gemini categorization failed for '{channel_name}': {e}")
         return None
 
+
 def stream_and_categorize(lines_iterator):
-    """
-    Processes the M3U line-by-line, prioritizing keywords, then using the LLM for smart categorization, 
-    and finally filtering based on your desired regions.
-    """
+    # ... (Unchanged logic for streaming, categorization, and filtering) ...
     yield '#EXTM3U\n'
 
     current_ext = None
@@ -133,25 +130,18 @@ def stream_and_categorize(lines_iterator):
             
             # 2. SMART LLM CHECK (SLOW, uses API)
             if not found and GEMINI_API_KEY:
-                # The LLM categorization runs only if the fast keyword check failed
                 llm_category = get_llm_category(display)
                 if llm_category:
-                    found = llm_category # Use the LLM's generated category
+                    found = llm_category
 
             # === FINAL FILTERING LOGIC ===
-            
-            # If no category was found (keyword or LLM), skip this channel.
             if not found:
                 current_ext = None
                 continue
             
-            # If the category found is NOT one of our predefined US/Mexico groups, 
-            # we check if the LLM output (stored in 'found') contains US/Mexico regions.
             if found not in CATEGORIES:
-                # We are checking the LLM-generated string for US or Mexico keywords.
                 llm_cat_lower = found.lower()
                 
-                # If the LLM output is NOT relevant to the user's desired regions, filter it out.
                 if not any(region in llm_cat_lower for region in ['usa', 'us', 'mexico', 'latino', 'spanish']):
                     current_ext = None
                     continue
@@ -175,54 +165,60 @@ def home():
 
 @app.route("/m3u")
 def get_m3u():
-    """Fetches the source M3U using a fallback list of hosts and streams the result."""
+    """Fetches the source M3U using the one known good host and includes a retry mechanism."""
     username = os.environ.get("USERNAME")
     password = os.environ.get("PASSWORD")
     
     if not username or not password:
         return Response("ERROR: Authentication credentials (USERNAME or PASSWORD) are not set.", mimetype="text/plain", status=500)
 
-    # Hardcoded list of IPTV provider hosts for automatic failover
-    hosts = [
-        "http://line.premiumpowers.net",
-        "http://servidorgps.org",
-        "http://EdgesBuddySad.h1ott.com",
-        "http://superberiln24.com"
-    ]
+    # 1. Use ONLY the host that showed successful connection in the logs.
+    host = "http://line.premiumpowers.net"
+    m3u_url = f"{host}/get.php?username={username}&password={password}&type=m3u_plus&output=ts"
+
+    MAX_RETRIES = 3
+    RETRY_DELAY = 10 # seconds
 
     successful_response = None
-    last_error = "No host attempted yet."
+    last_error = "Connection attempt failed."
     
-    for host in hosts:
-        m3u_url = f"{host}/get.php?username={username}&password={password}&type=m3u_plus&output=ts"
-        print(f"Attempting connection to: {host}")
+    for attempt in range(MAX_RETRIES):
+        print(f"Attempting connection to: {host} (Attempt {attempt + 1}/{MAX_RETRIES})")
         
         try:
             r = requests.get(m3u_url, timeout=300, stream=True) 
-            r.raise_for_status()
+            r.raise_for_status() 
             
             lines_iterator = r.iter_lines()
             first_line = next(lines_iterator, b'').decode('utf-8').strip()
             
             if first_line.startswith('#EXTM3U'):
                 successful_response = r
-                break
+                break # Success! Break out of the retry loop
             else:
-                last_error = f"Host {host} returned content that didn't start with #EXTM3U."
+                last_error = f"Host {host} returned content that didn't start with #EXTM3U (Status: {r.status_code})."
                 print(last_error)
 
         except requests.exceptions.RequestException as e:
             last_error = f"Host {host} failed with error: {e}"
             print(last_error)
 
+        # Only retry if it's not the last attempt
+        if attempt < MAX_RETRIES - 1:
+            print(f"Waiting {RETRY_DELAY} seconds before retrying...")
+            time.sleep(RETRY_DELAY)
+
+
+    # If a successful streaming response was found, pass it to the generator
     if successful_response:
         lines_to_process = itertools.chain([first_line.encode('utf-8')], successful_response.iter_lines())
         
         # Flask Response streams the output using the generator
         return Response(stream_and_categorize(lines_to_process), mimetype="application/x-mpegurl")
     else:
-        print("FATAL: All hosts failed to return a valid M3U file.")
-        return Response(f"Error: Could not retrieve a valid M3U from any host. Last error: {last_error}", mimetype="text/plain", status=503)
+        # All retry attempts failed
+        print("FATAL: All retry attempts failed to return a valid M3U file.")
+        return Response(f"Error: Could not retrieve a valid M3U after {MAX_RETRIES} attempts. Last error: {last_error}", mimetype="text/plain", status=503)
 
 # ======== Run App (for local testing, Render uses Gunicorn) ========
 if __name__ == "__main__":
