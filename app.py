@@ -7,13 +7,9 @@ import os
 app = Flask(__name__)
 
 # IMPORTANT: A regular expression to reliably split the M3U line into two parts:
-# 1. The #EXTINF attributes (Group 1)
-# 2. The Channel Display Name (Group 2)
-# This is much safer than just splitting by a comma, which can sometimes appear in channel names.
 EXTINF_REGEX = re.compile(r'^(#EXTINF:[^,]*)(?:,)(.*)', re.IGNORECASE)
 
 # ======== Categories ========
-# These keywords are matched against the LOWERCased channel name.
 CATEGORIES = {
     "USA News": ["cnn", "fox news", "msnbc", "nbc news", "abc news", "cbs news"],
     "USA Movies": ["hbo", "cinemax", "starz", "amc", "showtime", "tcm", "movie"],
@@ -36,75 +32,51 @@ CATEGORIES = {
     "Adult": ["xxx", "porn", "adult", "eros"]
 }
 
-# ======== Helper Functions ========
+# ======== Helper Functions (unchanged) ========
 
 def add_group_title(extinf_line, category):
-    """
-    Adds or replaces the 'group-title' attribute in the #EXTINF line.
-    """
-    # 1. Check if group-title already exists
+    """Adds or replaces the 'group-title' attribute."""
     if 'group-title' in extinf_line.lower():
-        # Replace the existing group-title value with the new category
         return re.sub(r'group-title=".*?"', f'group-title="{category}"', extinf_line, count=1, flags=re.IGNORECASE)
     
-    # 2. If no group-title, insert it right after the attributes but before the channel name comma
     match = EXTINF_REGEX.match(extinf_line)
     if match:
         attributes = match.group(1).strip()
         display_name = match.group(2).strip()
-        
-        # Reconstruct: Attributes + new group-title + comma + Display Name
-        # We ensure the original comma is replaced after we add the new attribute.
         return f'{attributes} group-title="{category}",{display_name}'
 
-    return extinf_line # Return original line if parsing fails
+    return extinf_line
 
 def parse_and_clean(lines):
-    """
-    Iterates through the raw M3U lines and applies category grouping.
-    """
+    """Iterates through the raw M3U lines and applies category grouping."""
     organized = ['#EXTM3U']
     i = 0
     while i < len(lines):
         line = lines[i].strip()
-        
-        # Check if the line is the start of a channel entry
         if line.startswith('#EXTINF'):
-            # Use the robust regex to parse the line
             match = EXTINF_REGEX.match(line)
-            
             if not match:
                 i += 1
-                continue # Skip invalid line structure
+                continue
 
-            ext = line # Original #EXTINF line
-            
-            # The part of the line that contains the channel name
+            ext = line 
             display_name = match.group(2).strip()
-            display = display_name.lower() # Lowercase for keyword matching
-            
-            # The next line should be the stream URL
+            display = display_name.lower()
             stream = lines[i+1].strip() if (i+1) < len(lines) else ''
-
             found = None
-            # Loop through all categories and check for keywords
             for cat, keywords in CATEGORIES.items():
                 if any(kw in display for kw in keywords):
                     found = cat
                     break
             
-            # If a category was found, update the line and add the pair to the list
             if found:
                 new_ext = add_group_title(ext, found)
                 organized.append(new_ext)
                 organized.append(stream)
             
-            # Skip the #EXTINF line and the URL line (always 2 lines total)
             i += 2
         else:
-            # Skip any other line (like #EXTGRP, comments, or blank lines)
             i += 1
-            
     return organized
 
 # ======== Routes (The Web URLs) ========
@@ -116,47 +88,71 @@ def home():
 
 @app.route("/m3u")
 def get_m3u():
-    """Fetches the source M3U, cleans and categorizes it, and serves the result."""
-    try:
-        # 1. Get Authentication Details from the secure environment variables
-        username = os.environ.get("USERNAME")
-        password = os.environ.get("PASSWORD")
-        
-        if not username or not password:
-            return Response("ERROR: Authentication credentials (USERNAME or PASSWORD) are not set. Cannot fetch source playlist.", mimetype="text/plain", status=500)
-
-        # 2. Build the URL for your original IPTV provider
-        m3u_url = f"http://line.premiumpowers.net/get.php?username={username}&password={password}&type=m3u_plus&output=ts"
-        
-        # 3. Fetch the original playlist with an increased timeout (60 seconds)
-        # --- MODIFIED TIMEOUT HERE ---
-        r = requests.get(m3u_url, timeout=60) 
-        # -----------------------------
-        r.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
-
-        # 4. Check if the response is actually an M3U file
-        if not r.text.strip().startswith('#EXTM3U'):
-            return Response("ERROR: The server returned content but it doesn't look like an M3U file. Check provider URL or credentials.", mimetype="text/plain", status=500)
-
-        # 5. Process the playlist
-        lines = r.text.splitlines()
-        organized_lines = parse_and_clean(lines)
-        
-        # 6. Return the newly organized playlist
-        return Response("\n".join(organized_lines), mimetype="application/x-mpegurl") # Use correct M3U MIME type
-        
-    except requests.exceptions.RequestException as e:
-        # Handle network or HTTP errors, including the timeout we just experienced
-        print(f"Network or HTTP Error: {e}")
-        # Return 503 Service Unavailable, which is good practice for upstream errors
-        return Response(f"Error fetching source playlist (Network Issue, possibly slow provider): {e}", mimetype="text/plain", status=503)
+    """Fetches the source M3U using a fallback list of hosts."""
+    username = os.environ.get("USERNAME")
+    password = os.environ.get("PASSWORD")
     
-    except Exception as e:
-        # Handle all other unexpected errors
-        print(f"General Error: {e}")
-        return Response(f"An unexpected error occurred during processing: {e}", mimetype="text/plain", status=500)
+    # 1. Get the list of HOSTS from environment variables
+    host_string = os.environ.get("IPTV_HOSTS")
 
-# ======== Run App ========
+    if not username or not password or not host_string:
+        return Response("ERROR: Authentication credentials (USERNAME, PASSWORD, or IPTV_HOSTS) are not set.", mimetype="text/plain", status=500)
+
+    # Convert the pipe-separated string into a list of hosts
+    hosts = [h.strip() for h in host_string.split('|') if h.strip()]
+
+    if not hosts:
+        return Response("ERROR: IPTV_HOSTS is set but contains no valid hosts.", mimetype="text/plain", status=500)
+
+    # 2. Loop through the hosts until a successful connection is made
+    successful_response = None
+    last_error = None
+    
+    for host in hosts:
+        # 3. Construct the full M3U URL for the current host
+        # Note: We assume the base path is always '/get.php?'
+        m3u_url = f"{host}/get.php?username={username}&password={password}&type=m3u_plus&output=ts"
+        print(f"Attempting connection to: {host}") # Log which host we are trying
+        
+        try:
+            # 4. Fetch the playlist with the 300-second timeout
+            r = requests.get(m3u_url, timeout=300) 
+            r.raise_for_status() # Raises HTTPError for 4xx or 5xx status codes
+            
+            # If successful and looks like M3U, we stop and use this one
+            if r.text.strip().startswith('#EXTM3U'):
+                successful_response = r
+                break 
+            else:
+                last_error = f"Host {host} returned content, but it was not a valid M3U."
+                print(last_error)
+
+        except requests.exceptions.RequestException as e:
+            last_error = f"Host {host} failed with error: {e}"
+            print(last_error)
+            # Continue to the next host in the list
+
+    # 5. Check the result after looping through all hosts
+    if successful_response:
+        try:
+            # Process the playlist
+            lines = successful_response.text.splitlines()
+            organized_lines = parse_and_clean(lines)
+            
+            # Return the newly organized playlist
+            return Response("\n".join(organized_lines), mimetype="application/x-mpegurl")
+        
+        except Exception as e:
+            # Handle processing errors after successful fetch
+            print(f"Error during M3U processing: {e}")
+            return Response(f"Error occurred during M3U processing: {e}", mimetype="text/plain", status=500)
+
+    else:
+        # All hosts failed
+        print("FATAL: All hosts failed to return a valid M3U file.")
+        return Response(f"Error: Could not retrieve a valid M3U from any backup host. Last error was: {last_error}", mimetype="text/plain", status=503)
+
+# ======== Run App (unchanged) ========
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000)) 
     app.run(host="0.0.0.0", port=port)
