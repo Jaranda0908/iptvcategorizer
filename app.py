@@ -21,14 +21,20 @@ CATEGORIES = {
     "USA News": ["chicago", "illinois", "news", "local"], 
     "USA Movies": ["hbo", "cinemax", "starz", "amc", "showtime", "tcm", "movie", "christmas", "films"],
     "USA Kids": ["cartoon", "nick", "disney", "boomerang", "pbskids", "disney jr", "cartoonito"],
-    "US LATINO": ["telemundo", "univision", "uni mas", "unimas", "galavision", "hispana", "latino", "spanish"],
+    # EXPANDED US LATINO CATEGORY (Includes all networks you listed for maximum capture)
+    "US LATINO": [
+        "telemundo", "univision", "uni mas", "unimas", "galavision", "hispana", "latino", "spanish",
+        "estrella tv", "america teve", "cnn en español", "cine mexicano", "discovery en español",
+        "discovery familia", "espn deportes", "fox deportes", "mega tv", "mtv tres", "universo", "vme",
+        "wapa america"
+    ],
     "Documentary": ["nat geo", "discovery", "history", "documentary", "science", "travel"],
     "Adult": ["xxx", "porn", "adult", "eros"],
     
     # MEXICO CATEGORIES (Strictly enforced for MX| / MXC| streams only)
     "Mexico News": ["televisa", "tv azteca", "milenio", "imagen", "foro tv", "forotv", "noticias", "news"],
     "Mexico Movies": ["cine", "canal 5", "canal once", "cinema", "peliculas"],
-    # FIXED: Removed ambiguous 'cn' keyword to prevent CNN leak.
+    # FIXED: Ambiguous 'cn' keyword removed to prevent CNN leak in Kids category.
     "Mexico Kids": [
         "cartoon", "nick", "disney", "boomerang", "pbskids", "infantil", "ninos", "niños", "discovery kids", 
         "cartoonito", "junior", "kids"
@@ -36,6 +42,7 @@ CATEGORIES = {
     "Mexico General": ["las estrellas", "azteca uno", "canal 2", "televisa", "azteca", "canal 4", "general"],
     
     # GLOBAL/SPORTS CATEGORIES (Function as US-priority sports)
+    # NOTE: No Mexican sports keywords here, forcing those channels into Mexico General.
     "Basketball": ["nba", "basketball"],
     "Football": ["nfl", "football", "college football", "espn college"],
     "Baseball": ["mlb", "baseball"],
@@ -113,8 +120,8 @@ def stream_and_categorize(lines_iterator, tvg_url=None):
                 target_categories = US_CATEGORY_NAMES.union(GLOBAL_CATEGORY_NAMES)
                 is_mexican_stream = False
             elif display_upper.startswith(('MX|', 'MXC|')):
-                # Mexican streams check Mexico categories and Global categories (ensuring separation from US-only groups)
-                target_categories = MEXICO_CATEGORY_NAMES # Only check Mexican-specific categories
+                # Mexican streams check Mexico categories (no Documentary/Adult) and no Global Sports
+                target_categories = MEXICO_CATEGORY_NAMES 
                 is_mexican_stream = True
             else:
                 current_ext = None 
@@ -131,8 +138,7 @@ def stream_and_categorize(lines_iterator, tvg_url=None):
                     break
             
             # --- 5. Fallback Logic (General Groups) ---
-            # If a US/MX channel has a sports keyword but it wasn't in their specific list,
-            # it falls into the general category.
+            # Any channel that did not match a specific category falls here.
             if not found:
                 if is_mexican_stream:
                     found = "Mexico General" 
