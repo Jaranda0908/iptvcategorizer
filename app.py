@@ -17,7 +17,8 @@ TVG_URL_REGEX = re.compile(r'url-tvg="([^"]+)"', re.IGNORECASE)
 # ======== Categories (Final, Bulletproof List) ========
 CATEGORIES = {
     # USA CATEGORIES (Strictly enforced for US| streams only)
-    "USA News": ["cnn", "fox news", "msnbc", "nbc news", "abc news", "cbs news", "chicago", "illinois", "news"],
+    # NEWS: Restricted to local only (Chicago, Illinois, and general "news" for local affiliates)
+    "USA News": ["chicago", "illinois", "news", "local"], 
     "USA Movies": ["hbo", "cinemax", "starz", "amc", "showtime", "tcm", "movie", "christmas", "films"],
     "USA Kids": ["cartoon", "nick", "disney", "boomerang", "pbskids", "disney jr", "cartoonito"],
     "US LATINO": ["telemundo", "univision", "uni mas", "unimas", "galavision", "hispana", "latino", "spanish"],
@@ -27,14 +28,14 @@ CATEGORIES = {
     # MEXICO CATEGORIES (Strictly enforced for MX| / MXC| streams only)
     "Mexico News": ["televisa", "tv azteca", "milenio", "imagen", "foro tv", "forotv", "noticias", "news"],
     "Mexico Movies": ["cine", "canal 5", "canal once", "cinema", "peliculas"],
+    # FIXED: Removed ambiguous 'cn' keyword to prevent CNN leak.
     "Mexico Kids": [
         "cartoon", "nick", "disney", "boomerang", "pbskids", "infantil", "ninos", "niños", "discovery kids", 
-        "cartoonito", "junior", "kids", "cn"
+        "cartoonito", "junior", "kids"
     ],
     "Mexico General": ["las estrellas", "azteca uno", "canal 2", "televisa", "azteca", "canal 4", "general"],
     
-    # GLOBAL/SPORTS CATEGORIES (Now function as US-priority categories)
-    # *Mexican sports keywords removed here, so those channels fall to Mexico General.*
+    # GLOBAL/SPORTS CATEGORIES (Function as US-priority sports)
     "Basketball": ["nba", "basketball"],
     "Football": ["nfl", "football", "college football", "espn college"],
     "Baseball": ["mlb", "baseball"],
