@@ -119,19 +119,19 @@ def get_m3u():
     """Fetches the source M3U, cleans and categorizes it, and serves the result."""
     try:
         # 1. Get Authentication Details from the secure environment variables
-        # When you host this app, you must set these variables (USERNAME, PASSWORD)
         username = os.environ.get("USERNAME")
         password = os.environ.get("PASSWORD")
         
         if not username or not password:
-            # IMPORTANT: Change this message after deployment! 
-            return Response("ERROR: Authentication credentials (USERNAME or PASSWORD) are not set. I can't fetch your source playlist.", mimetype="text/plain", status=500)
+            return Response("ERROR: Authentication credentials (USERNAME or PASSWORD) are not set. Cannot fetch source playlist.", mimetype="text/plain", status=500)
 
         # 2. Build the URL for your original IPTV provider
         m3u_url = f"http://line.premiumpowers.net/get.php?username={username}&password={password}&type=m3u_plus&output=ts"
         
-        # 3. Fetch the original playlist
-        r = requests.get(m3u_url, timeout=30)
+        # 3. Fetch the original playlist with an increased timeout (60 seconds)
+        # --- MODIFIED TIMEOUT HERE ---
+        r = requests.get(m3u_url, timeout=60) 
+        # -----------------------------
         r.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
 
         # 4. Check if the response is actually an M3U file
@@ -146,9 +146,10 @@ def get_m3u():
         return Response("\n".join(organized_lines), mimetype="application/x-mpegurl") # Use correct M3U MIME type
         
     except requests.exceptions.RequestException as e:
-        # Handle network or HTTP errors
+        # Handle network or HTTP errors, including the timeout we just experienced
         print(f"Network or HTTP Error: {e}")
-        return Response(f"Error fetching source playlist (Network Issue): {e}", mimetype="text/plain", status=503)
+        # Return 503 Service Unavailable, which is good practice for upstream errors
+        return Response(f"Error fetching source playlist (Network Issue, possibly slow provider): {e}", mimetype="text/plain", status=503)
     
     except Exception as e:
         # Handle all other unexpected errors
@@ -157,7 +158,5 @@ def get_m3u():
 
 # ======== Run App ========
 if __name__ == "__main__":
-    # Get the port from the environment, defaulting to 10000. 
-    # This is standard practice for hosting platforms like Render or Heroku.
-    port = int(os.environ.get("PORT", 10000)) 
+    port = int(os.environ.get("PORT", 5000)) 
     app.run(host="0.0.0.0", port=port)
