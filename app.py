@@ -6,7 +6,7 @@ import time
 app = Flask(__name__)
 
 # Your remote M3U URL
-M3U_URL = "http://YOUR_REMOTE_M3U_LINK_HERE"
+M3U_URL = http://line.premiumpowers.net/get.php?username=1d0c233137&password=5bcc23b7e8&type=m3u_plus&output=ts
 
 # Cache settings
 cached_m3u = None
@@ -54,3 +54,4 @@ def get_m3u():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
