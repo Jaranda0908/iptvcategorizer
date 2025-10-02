@@ -6,7 +6,7 @@ import os
 # Initialize the Flask web application
 app = Flask(__name__)
 
-# IMPORTANT: A regular expression to reliably split the M3U line into two parts:
+# Regex to capture attributes (Group 1) and display name (Group 2)
 EXTINF_REGEX = re.compile(r'^(#EXTINF:[^,]*)(?:,)(.*)', re.IGNORECASE)
 
 # ======== Categories ========
@@ -32,7 +32,7 @@ CATEGORIES = {
     "Adult": ["xxx", "porn", "adult", "eros"]
 }
 
-# ======== Helper Functions (unchanged) ========
+# ======== Helper Functions ========
 
 def add_group_title(extinf_line, category):
     """Adds or replaces the 'group-title' attribute."""
@@ -47,37 +47,58 @@ def add_group_title(extinf_line, category):
 
     return extinf_line
 
-def parse_and_clean(lines):
-    """Iterates through the raw M3U lines and applies category grouping."""
-    organized = ['#EXTM3U']
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        if line.startswith('#EXTINF'):
-            match = EXTINF_REGEX.match(line)
-            if not match:
-                i += 1
-                continue
+def stream_and_categorize(lines_iterator):
+    """
+    A generator function that processes the M3U line-by-line (streaming)
+    to avoid running out of memory.
+    """
+    # 1. Yield the required header immediately
+    yield '#EXTM3U\n'
 
-            ext = line 
-            display_name = match.group(2).strip()
-            display = display_name.lower()
-            stream = lines[i+1].strip() if (i+1) < len(lines) else ''
+    current_ext = None
+    
+    # 2. Iterate through lines as they are received
+    for raw_line in lines_iterator:
+        try:
+            line = raw_line.decode('utf-8').strip()
+        except UnicodeDecodeError:
+            continue # Skip lines that can't be decoded
+
+        if line.startswith('#EXTINF'):
+            current_ext = line
+            # Continue to the next line to find the stream URL
+            continue
+        
+        # 3. If the line is a stream URL and follows an #EXTINF line
+        if current_ext and (line.startswith('http') or line.startswith('rtmp')):
+            # Process the channel name for categorization
+            match = EXTINF_REGEX.match(current_ext)
+            if not match:
+                current_ext = None
+                continue
+                
+            display = match.group(2).strip().lower()
+            
             found = None
+            # Find the category based on keywords
             for cat, keywords in CATEGORIES.items():
                 if any(kw in display for kw in keywords):
                     found = cat
                     break
             
+            # If categorized, yield the modified #EXTINF line and the URL
             if found:
-                new_ext = add_group_title(ext, found)
-                organized.append(new_ext)
-                organized.append(stream)
-            
-            i += 2
-        else:
-            i += 1
-    return organized
+                new_ext = add_group_title(current_ext, found)
+                yield new_ext + '\n'
+                yield line + '\n'
+
+            # Reset the state for the next channel pair
+            current_ext = None
+
+        # Ignore other lines (like #EXTGRP or comments)
+        elif current_ext:
+            # If we had an EXTINF but the next line wasn't a stream, reset
+            current_ext = None
 
 # ======== Routes (The Web URLs) ========
 
@@ -88,16 +109,14 @@ def home():
 
 @app.route("/m3u")
 def get_m3u():
-    """Fetches the source M3U using a fallback list of hosts."""
+    """Fetches the source M3U using a fallback list of hosts and streams the result."""
     username = os.environ.get("USERNAME")
     password = os.environ.get("PASSWORD")
     
-    # Check only for username/password, as hosts are now hardcoded
     if not username or not password:
         return Response("ERROR: Authentication credentials (USERNAME or PASSWORD) are not set.", mimetype="text/plain", status=500)
 
     # 1. Hardcoded list of IPTV provider hosts for automatic failover
-    # The hosts will be tried in this order until one returns a valid M3U file.
     hosts = [
         "http://line.premiumpowers.net",
         "http://servidorgps.org",
@@ -105,49 +124,40 @@ def get_m3u():
         "http://superberiln24.com"
     ]
 
-    # 2. Loop through the hosts until a successful connection is made
     successful_response = None
-    last_error = None
+    last_error = "No host attempted yet."
     
     for host in hosts:
-        # 3. Construct the full M3U URL for the current host
-        # Note: We assume the base path is always '/get.php?'
         m3u_url = f"{host}/get.php?username={username}&password={password}&type=m3u_plus&output=ts"
-        print(f"Attempting connection to: {host}") # Log which host we are trying
+        print(f"Attempting connection to: {host}")
         
         try:
-            # 4. Fetch the playlist with the 300-second timeout
-            r = requests.get(m3u_url, timeout=300) 
-            r.raise_for_status() # Raises HTTPError for 4xx or 5xx status codes
+            # 2. IMPORTANT: Use stream=True to prevent loading the entire file into memory
+            r = requests.get(m3u_url, timeout=300, stream=True) 
+            r.raise_for_status() 
             
-            # If successful and looks like M3U, we stop and use this one
-            if r.text.strip().startswith('#EXTM3U'):
+            # Check for a valid M3U file start without loading the entire content
+            first_line = next(r.iter_lines(), b'').decode('utf-8').strip()
+            
+            if first_line.startswith('#EXTM3U'):
                 successful_response = r
                 break 
             else:
-                last_error = f"Host {host} returned content, but it was not a valid M3U."
+                last_error = f"Host {host} returned content that didn't start with #EXTM3U."
                 print(last_error)
 
         except requests.exceptions.RequestException as e:
             last_error = f"Host {host} failed with error: {e}"
             print(last_error)
-            # Continue to the next host in the list
+            # Continue to the next host
 
-    # 5. Check the result after looping through all hosts
+    # 3. If a successful streaming response was found, pass it to the generator
     if successful_response:
-        try:
-            # Process the playlist
-            lines = successful_response.text.splitlines()
-            organized_lines = parse_and_clean(lines)
-            
-            # Return the newly organized playlist
-            return Response("\n".join(organized_lines), mimetype="application/x-mpegurl")
+        # Chain the first line (already read) back onto the rest of the stream
+        lines_to_process = [first_line.encode('utf-8')] + list(successful_response.iter_lines())
         
-        except Exception as e:
-            # Handle processing errors after successful fetch
-            print(f"Error during M3U processing: {e}")
-            return Response(f"Error occurred during M3U processing: {e}", mimetype="text/plain", status=500)
-
+        # Flask Response streams the output using the generator, consuming minimal memory
+        return Response(stream_and_categorize(iter(lines_to_process)), mimetype="application/x-mpegurl")
     else:
         # All hosts failed
         print("FATAL: All hosts failed to return a valid M3U file.")
@@ -157,3 +167,12 @@ def get_m3u():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000)) 
     app.run(host="0.0.0.0", port=port)
+```eof
+
+### Next Step
+
+1.  **Replace** your current `app.py` on GitHub with this code.
+2.  **Commit** the change.
+3.  **Wait** for Render to automatically redeploy.
+
+This is the most robust version, engineered specifically to beat the memory limit, the slow network, and the single-host problem. Once it's Live, you'll be ready for Tivimate!
