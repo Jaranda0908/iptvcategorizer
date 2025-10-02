@@ -92,17 +92,18 @@ def get_m3u():
     username = os.environ.get("USERNAME")
     password = os.environ.get("PASSWORD")
     
-    # 1. Get the list of HOSTS from environment variables
-    host_string = os.environ.get("IPTV_HOSTS")
+    # Check only for username/password, as hosts are now hardcoded
+    if not username or not password:
+        return Response("ERROR: Authentication credentials (USERNAME or PASSWORD) are not set.", mimetype="text/plain", status=500)
 
-    if not username or not password or not host_string:
-        return Response("ERROR: Authentication credentials (USERNAME, PASSWORD, or IPTV_HOSTS) are not set.", mimetype="text/plain", status=500)
-
-    # Convert the pipe-separated string into a list of hosts
-    hosts = [h.strip() for h in host_string.split('|') if h.strip()]
-
-    if not hosts:
-        return Response("ERROR: IPTV_HOSTS is set but contains no valid hosts.", mimetype="text/plain", status=500)
+    # 1. Hardcoded list of IPTV provider hosts for automatic failover
+    # The hosts will be tried in this order until one returns a valid M3U file.
+    hosts = [
+        "http://line.premiumpowers.net",
+        "http://servidorgps.org",
+        "http://EdgesBuddySad.h1ott.com",
+        "http://superberiln24.com"
+    ]
 
     # 2. Loop through the hosts until a successful connection is made
     successful_response = None
