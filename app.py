@@ -3,27 +3,29 @@ import requests
 import re
 import os
 import itertools
-import time # Used for retry logic delay
+import time 
 import json # Used for API call payload
 
 # Initialize the Flask web application
 app = Flask(__name__)
 
-# Regex definitions (unchanged)
+# Regex definitions 
 EXTINF_REGEX = re.compile(r'^(#EXTINF:[^,]*)(?:,)(.*)', re.IGNORECASE)
 TVG_URL_REGEX = re.compile(r'url-tvg="([^"]+)"', re.IGNORECASE)
 
 # --- LLM API Configuration ---
-GEMINI_MODEL = "gemini-2.5-flash-preview-05-20"
-# Base URL for the API call (will be built with the key later)
+# NOTE: GEMINI_API_KEY must be set in Render environment variables
+GEMINI_MODEL = "gemini-2.5-flash" 
 GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/"
 
 # ======== Categories (Final, Bulletproof List) ========
 CATEGORIES = {
-    # USA CATEGORIES (Strictly enforced for US| streams only)
+    # USA CATEGORIES 
+    # NEWS: Restricted to local only (Chicago, Illinois, and general "news" for local affiliates)
     "USA News": ["chicago", "illinois", "chgo"], 
     "USA Movies": ["hbo", "cinemax", "starz", "amc", "showtime", "tcm", "movie", "christmas", "films"],
     "USA Kids": ["cartoon", "nick", "disney", "boomerang", "pbskids", "disney jr", "cartoonito"],
+    # US LATINO: Expanded for maximum capture
     "US LATINO": [
         "telemundo", "univision", "uni mas", "unimas", "galavision", "hispana", "latino", "spanish",
         "estrella tv", "america teve", "cnn en español", "cine mexicano", "discovery en español",
@@ -33,7 +35,7 @@ CATEGORIES = {
     "Documentary": ["nat geo", "discovery", "history", "documentary", "science", "travel"],
     "Adult": ["xxx", "porn", "adult", "eros"],
     
-    # MEXICO CATEGORIES (Strictly enforced for MX| / MXC| streams only)
+    # MEXICO CATEGORIES 
     "Mexico News": ["televisa", "tv azteca", "milenio", "imagen", "foro tv", "forotv", "noticias", "news"],
     "Mexico Movies": ["cine", "canal 5", "canal once", "cinema", "peliculas"],
     "Mexico Kids": [
@@ -61,44 +63,35 @@ US_CATEGORY_NAMES = {"USA News", "USA Movies", "USA Kids", "US LATINO", "Documen
 MEXICO_CATEGORY_NAMES = {"Mexico News", "Mexico Movies", "Mexico Kids", "Mexico General"}
 GLOBAL_CATEGORY_NAMES = CATEGORIES.keys() - US_CATEGORY_NAMES - MEXICO_CATEGORY_NAMES
 
-# List of all category names for LLM prompt
-ALL_CATEGORY_NAMES = list(CATEGORIES.keys()) + ["USA General", "Mexico General"]
 
 # ======== New LLM Helper Function (Safe and Targeted) ========
 
-def get_llm_category(channel_name, api_key, is_mexican):
+def get_llm_category(channel_name, api_key, target_categories):
     """
-    Uses Gemini API to categorize a channel that failed the keyword check.
-    Returns the new category name or None.
+    Uses Gemini API with Search Grounding to categorize a channel that failed the keyword check.
+    Only called for US News and US Latino categories.
     """
     if not api_key:
         return None
     
-    # Give the model all possible valid categories to choose from
-    category_list = ALL_CATEGORY_NAMES
-    
     # System instruction focuses the model on the task and response format
     system_prompt = (
-        "You are an M3U playlist categorizer. Analyze the channel name and select the BEST matching group title "
-        "from the following list: " + ", ".join(category_list) + ". "
-        "Respond with ONLY the selected group title string, NOTHING ELSE."
+        "You are an M3U playlist categorizer. Your task is to confirm or assign a category for the provided channel name. "
+        "Use Google Search to verify the channel's type and intended market. "
+        f"Output ONLY the single BEST matching group title from this list: {', '.join(target_categories)} "
+        "or respond with 'Uncategorized' if it does not fit."
     )
     
-    # Prompt asks the model to categorize and check the origin
-    user_query = (
-        f"Categorize this channel name: '{channel_name}'. "
-        f"If you can confirm its origin is not US, Mexican, or Latino, select 'USA General' or 'Mexico General' based on the language/region, "
-        "but only use US/Mexico/Latino specific categories if the channel is confirmed to be local or relevant."
-    )
+    user_query = f"Categorize this channel name: '{channel_name}'"
 
-    url = f"{GEMINI_API_BASE_URL}{GEMINI_MODEL}:generateContent?key={api_key}"
+    url = f"{GEMINI_API_BASE_URL}gemini-2.5-flash:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
     
     payload = {
         "contents": [{"parts": [{"text": user_query}]}],
-        "tools": [{"google_search": {}}], # Use Google Search for grounding
+        "tools": [{"google_search": {}}], 
         "systemInstruction": {"parts": [{"text": system_prompt}]},
-        "config": {"temperature": 0.1} # Lower temperature for stable categorization
+        "config": {"temperature": 0.1}
     }
 
     try:
@@ -108,25 +101,24 @@ def get_llm_category(channel_name, api_key, is_mexican):
         
         result = response.json()
         
-        # Safely extract the generated text response
-        text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '').strip()
+        text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'Uncategorized').strip()
         
-        # Validate that the response is one of the allowed categories
-        if text in category_list:
+        # Check if the LLM output is a valid category name
+        if text in target_categories:
             return text
-        else:
-            print(f"LLM returned invalid category: {text}")
-            return None # Invalid response, treat as unclassified
+        
+        return None # If it's Uncategorized or an invalid response
             
     except requests.exceptions.RequestException as e:
-        print(f"Gemini API call failed: {e}")
+        print(f"Gemini API call failed for {channel_name}: {e}")
         return None
 
 # ======== Core Processing Function (Updated for LLM) ========
 
 def stream_and_categorize(lines_iterator, tvg_url=None, api_key=None):
     """
-    Generator that processes the M3U line-by-line, including LLM fallback.
+    Generator that processes the M3U line-by-line, filtering by prefix,
+    categorizing using prefix priority, removing duplicates, and stripping prefixes.
     """
     seen_streams = set()
     
@@ -158,29 +150,30 @@ def stream_and_categorize(lines_iterator, tvg_url=None, api_key=None):
             display_upper = display_name.upper()
             display_lower = display_name.lower()
             
-            # --- 1. Crucial Prefix Filter (unchanged) ---
+            # --- 1. Crucial Prefix Filter ---
             if not display_upper.startswith(ACCEPTABLE_PREFIXES):
                 current_ext = None 
                 continue
 
+            # --- 2. De-Duplication Check ---
             if line in seen_streams:
                 current_ext = None 
                 continue
             
             seen_streams.add(line)
 
-            # --- 2. Determine Target Categories based on Prefix ---
+            # --- 3. Determine Target Categories based on Prefix ---
+            is_mexican_stream = display_upper.startswith(('MX|', 'MXC|'))
+            
             if display_upper.startswith('US|'):
                 target_categories = US_CATEGORY_NAMES.union(GLOBAL_CATEGORY_NAMES)
-                is_mexican_stream = False
-            elif display_upper.startswith(('MX|', 'MXC|')):
-                target_categories = MEXICO_CATEGORY_NAMES 
-                is_mexican_stream = True
+            elif is_mexican_stream:
+                target_categories = MEXICO_CATEGORY_NAMES
             else:
                 current_ext = None 
                 continue
 
-            # --- 3. Categorization Check (Keyword First) ---
+            # --- 4. Categorization Check (Keyword Priority) ---
             found = None
             for cat_name in target_categories:
                 keywords = CATEGORIES.get(cat_name)
@@ -188,20 +181,25 @@ def stream_and_categorize(lines_iterator, tvg_url=None, api_key=None):
                     found = cat_name
                     break
             
-            # --- 4. LLM Fallback (Targeted Smart Categorization) ---
+            # --- 5. Targeted LLM Fallback ---
             if not found and api_key:
-                print(f"No keyword match for {display_name}. Calling LLM...")
-                llm_category = get_llm_category(display_name, api_key, is_mexican_stream)
-                
-                # If LLM returns a valid category, use it
-                if llm_category:
-                    found = llm_category
-            
-            # --- 5. Final Fallback Logic (General Groups) ---
+                # Target only the difficult categories for LLM check
+                if (not is_mexican_stream and "news" in display_lower) or ("latino" in display_lower):
+                    print(f"Targeted LLM check for: {display_name}")
+                    
+                    # Define strict category set for LLM to choose from:
+                    llm_target_set = {"USA News", "US LATINO", "USA General"}
+                    
+                    llm_category = get_llm_category(display_name, api_key, llm_target_set)
+                    
+                    if llm_category:
+                        found = llm_category
+
+            # --- 6. Final Fallback Logic (General Groups) ---
             if not found:
                 found = "Mexico General" if is_mexican_stream else "USA General"
             
-            # --- 6. Final Formatting and Prefix Removal ---
+            # --- 7. Final Formatting and Prefix Removal ---
             new_display_name = display_name
             for prefix in ACCEPTABLE_PREFIXES:
                 if new_display_name.upper().startswith(prefix):
@@ -234,7 +232,7 @@ def get_m3u():
     """
     username = os.environ.get("USERNAME")
     password = os.environ.get("PASSWORD")
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY") # Get API Key here
     
     if not username or not password:
         return Response("ERROR: IPTV credentials (USERNAME or PASSWORD) not set.", mimetype="text/plain", status=500)
@@ -291,3 +289,16 @@ def get_m3u():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000)) 
     app.run(host="0.0.0.0", port=port)
+```eof
+
+***
+
+### 🛑 Critical Final Step: Dependencies
+
+For this code to work, you must update your `requirements.txt` file and set the `GEMINI_API_KEY`.
+
+1.  **Update `requirements.txt`:** Ensure this dependency is added:
+    ```
+    google-genai
+    ```
+2.  **Render Environment Variable:** Set the **`GEMINI_API_KEY`** environment variable on your Render dashboard.
