@@ -13,13 +13,10 @@ app = Flask(__name__)
 EXTINF_REGEX = re.compile(r'^(#EXTINF:[^,]*)(?:,)(.*)', re.IGNORECASE)
 TVG_URL_REGEX = re.compile(r'url-tvg="([^"]+)"', re.IGNORECASE)
 
-# --- LLM API Configuration (REMOVED FOR STABILITY) ---
-# NOTE: The LLM code has been removed. You can delete 'google-genai' from requirements.txt
-
 # ======== Categories (Final Exhaustive Keyword List for Stability) ========
 CATEGORIES = {
     # USA CATEGORIES 
-    # USA NEWS: Broadened to include all US news/weather for stability, since the local-only filter was unstable.
+    # USA NEWS: Broadened to include all US news/weather for stability (since local-only filtering was unstable).
     "USA News": ["news", "weather", "noticias", "cnn", "fox news", "msnbc", "nbc news", "abc news", "cbs news", "chicago", "illinois", "chgo"], 
     "USA Movies": ["hbo", "cinemax", "starz", "amc", "showtime", "tcm", "movie", "films", "cine", "mgm", "indieplex", "lmn", "lifetime movies"],
     "USA Kids": ["cartoon", "nick", "disney", "boomerang", "pbskids", "disney jr", "cartoonito"],
@@ -38,14 +35,14 @@ CATEGORIES = {
         "las estrellas", "azteca uno", "canal 2", "televisa", "azteca", "canal 4", "general", # General
         "cine", "canal 5", "canal once", "cinema", "peliculas", # Movies
         "mexico", "telemundo", "univision", "uni mas", "unimas", # Latino
-        "sports", "futbol", "fútbol", "deportes" # Sports (Since Mexican sports were removed from global categories)
+        "sports", "futbol", "fútbol", "deportes" # Sports 
     ],
     "Mexico Kids": ["cartoon", "nick", "disney", "boomerang", "pbskids", "infantil", "ninos", "niños", "discovery kids", "cartoonito", "junior", "kids"],
     
     # GLOBAL/SPORTS CATEGORIES (US-priority sports only)
     "Sports": ["sports", "football", "baseball", "basketball", "soccer", "tennis", "golf", "fighting", "nba", "nfl", "mlb", "espn"],
     
-    # GENERAL/MISC: Catches all remaining US networks (Documentary, General Entertainment, etc.)
+    # GENERAL/MISC: Catches all remaining US networks
     "USA General": ["general", "entertainment", "local", "abc", "cbs", "fox", "nbc", "pbs", "a&e", "bravo", "cmt", "comedy central", "e! entertainment", 
                     "freeform", "fx", "fxx", "fyi", "hln", "ion", "ion plus", "lifetime", "logo", "mav tv", "me tv", 
                     "mtv", "vice", "bet", "gsn", "txa21", "wciu", "the u", "cozi", "grit", "get tv", "buzzr", 
@@ -62,7 +59,7 @@ MEXICO_CATEGORY_NAMES = {"Mexico News", "Mexico General", "Mexico Kids"}
 ACCEPTABLE_PREFIXES = ('US|', 'MX|', 'MXC|')
 
 
-# ======== Helper Functions ========
+# ======== Helper Functions (No LLM) ========
 
 def add_group_title(extinf_line, category, display_name):
     """Adds or replaces the 'group-title' attribute and sets the final display name."""
@@ -135,7 +132,6 @@ def stream_and_categorize(lines_iterator, tvg_url=None):
             found = None
             for cat_name in target_categories:
                 keywords = CATEGORIES.get(cat_name)
-                # Check for direct keyword matches (which is 100% of the logic now)
                 if keywords and any(kw in display_lower for kw in keywords):
                     found = cat_name
                     break
@@ -177,15 +173,15 @@ def get_m3u():
     """
     username = os.environ.get("USERNAME")
     password = os.environ.get("PASSWORD")
-    # api_key is retrieved here but is not used, so it's safe to leave as an env var.
-    api_key = os.environ.get("GEMINI_API_KEY") 
     
     if not username or not password:
         return Response("ERROR: IPTV credentials (USERNAME or PASSWORD) not set.", mimetype="text/plain", status=500)
 
     # Use the only known stable host (with built-in retry logic)
     host = "http://line.premiumpowers.net"
-    m3u_url_template = f"{host}/get.php?username={username}&password={password}&type=m3u_plus&output=ts"
+    
+    # --- CRITICAL CHANGE: output=hls for improved streaming stability ---
+    m3u_url_template = f"{host}/get.php?username={username}&password={password}&type=m3u_plus&output=hls"
 
     successful_response = None
     lines_to_process = None
@@ -235,4 +231,3 @@ def get_m3u():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000)) 
     app.run(host="0.0.0.0", port=port)
-    
